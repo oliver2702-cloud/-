@@ -4,7 +4,7 @@ from typing import Generator
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-# 深度檔案解析套件 (補齊 PPTX, CSV 與 Pandas)
+# 深度檔案解析套件
 import pypdf
 import docx
 import openpyxl
@@ -19,7 +19,7 @@ from langchain_core.documents import Document as LCDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ==========================================
-# 1. 核心配置 (① 改為 PersistentClient 永久保存)
+# 1. 核心配置 (Chroma 永久保存版)
 # ==========================================
 app = FastAPI(title="Enterprise Lean RAG Hub")
 
@@ -29,7 +29,6 @@ os.makedirs(CHROMA_PATH, exist_ok=True)
 embeddings = OllamaEmbeddings(base_url="http://localhost:11434", model="bge-m3")
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
 
-# ① 啟用磁碟持久化儲存
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 vector_store = Chroma(
     client=chroma_client,
@@ -38,7 +37,7 @@ vector_store = Chroma(
 )
 
 # ==========================================
-# 2. 全格式文件解析與覆蓋更新 (②, ③, ④)
+# 2. 全格式文件解析與覆蓋更新
 # ==========================================
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -48,7 +47,6 @@ async def upload_document(file: UploadFile = File(...)):
         file_ext = os.path.splitext(filename)[1].lower()
         text_content = ""
 
-        # 各格式深度解析
         if file_ext == ".txt":
             text_content = contents.decode("utf-8", errors="ignore")
         elif file_ext == ".pdf":
@@ -60,11 +58,9 @@ async def upload_document(file: UploadFile = File(...)):
         elif file_ext == ".xlsx":
             wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
             text_content = "\n".join([", ".join([str(c) for c in r if c is not None]) for s in wb.worksheets for r in s.iter_rows(values_only=True)])
-        # ② 支援 PPTX
         elif file_ext == ".pptx":
             prs = pptx.Presentation(io.BytesIO(contents))
             text_content = "\n".join([shape.text for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text")])
-        # ③ 支援 CSV
         elif file_ext == ".csv":
             df = pd.read_csv(io.BytesIO(contents))
             text_content = df.to_string(index=False)
@@ -74,13 +70,11 @@ async def upload_document(file: UploadFile = File(...)):
         if not text_content.strip():
             return {"status": "error", "detail": "檔案內查無有效文字"}
 
-        # ④ 覆蓋更新防重複：上傳前先依據 source 標籤刪除舊資料
         try:
             vector_store.delete(where={"source": filename})
         except Exception:
             pass
 
-        # 切碎並儲存
         chunks = text_splitter.split_text(text_content)
         docs = [LCDocument(page_content=ch, metadata={"source": filename}) for ch in chunks]
         vector_store.add_documents(docs)
@@ -90,15 +84,13 @@ async def upload_document(file: UploadFile = File(...)):
         return {"status": "error", "detail": str(e)}
 
 # ==========================================
-# 3. RAG 檢索生成與多引用 (⑤, ⑥, ⑦)
+# 3. RAG 檢索生成與多引用
 # ==========================================
 def generate_rag_stream(question: str) -> Generator[str, None, None]:
-    # ⑤ 問題長度檢查
     if len(question.strip()) < 2:
         yield "data: ⚠️ 提問字數太短，請輸入更具體的完整問題。\\n\\n"
         return
 
-    # ⑥ 擴大 Top K 檢索（k=8 取前 4 名）
     try:
         raw_docs = vector_store.similarity_search_with_score(question, k=8)
     except Exception:
@@ -108,7 +100,6 @@ def generate_rag_stream(question: str) -> Generator[str, None, None]:
         yield "data: 📢 知識庫目前尚無資料，請先上傳文件建立索引。\\n\\n"
         return
 
-    # 去除重複與過濾低信心片段
     seen_content = set()
     valid_docs = []
     for doc, score in raw_docs:
@@ -121,7 +112,6 @@ def generate_rag_stream(question: str) -> Generator[str, None, None]:
         yield "data: 🔍 搜尋了硬碟資料庫，但查無信心度足夠的相符片段。\\n\\n"
         return
 
-    # 組裝 Prompt
     context = "\n".join([f"【來源: {d.metadata.get('source')}】: {d.page_content}" for d in valid_docs])
     system_prompt = (
         "你是一位嚴謹的企業知識庫助手。請完全且僅能依據下方的【參考資料】回答問題。\n"
@@ -130,12 +120,10 @@ def generate_rag_stream(question: str) -> Generator[str, None, None]:
         f"【使用者問題】: {question}"
     )
 
-    # 模型串流生成
     llm = ChatOllama(base_url="http://localhost:11434", model="qwen2.5:7b", temperature=0.0, streaming=True)
     for chunk in llm.stream(system_prompt):
         yield f"data: {chunk.content.replace(chr(10), '\\n')}\n\n"
     
-    # ⑦ 多來源引用展示
     sources = list({d.metadata["source"] for d in valid_docs})
     yield "data: \\n\\n---\\n### 📌 交叉引用與來源明細：\\n"
     for s in sources:
@@ -147,13 +135,12 @@ def chat_endpoint(question: str):
     return StreamingResponse(generate_rag_stream(question), media_type="text/event-stream")
 
 # ==========================================
-# 4. 統計數據路由 (⑧)
+# 4. 統計數據路由
 # ==========================================
 @app.get("/stats")
 def stats():
     try:
         count = vector_store._collection.count()
-        # 簡單估算不重複的文件數量
         metadatas = vector_store._collection.get(include=['metadatas'])['metadatas']
         doc_count = len(set([m['source'] for m in metadatas if m and 'source' in m]))
     except Exception:
@@ -161,7 +148,7 @@ def stats():
     return {"chunks": count, "documents": doc_count}
 
 # ==========================================
-# 5. 精美 UI 網頁（包含 ⑨ 拖曳、⑩ 深色模式，全面優化平板點擊）
+# 5. 精美 UI 網頁 (原生 HTML5/JS，100% 不崩潰，完美支援平板)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def index_page():
@@ -174,30 +161,21 @@ def index_page():
         <title>在地智能知識庫 (持久化版)</title>
         <style>
             :root { --bg: #f4f6f9; --box-bg: white; --text: #333; --border: #ccc; }
-            /* ⑩ 自動預設深色模式 (無需 JS) */
             @media (prefers-color-scheme: dark) {
                 :root { --bg: #121212; --box-bg: #1e1e1e; --text: #e0e0e0; --border: #444; }
             }
             body { font-family: system-ui, sans-serif; margin: 20px; background: var(--bg); color: var(--text); transition: 0.3s; }
             .box { background: var(--box-bg); padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid var(--border); }
-            
-            /* 平板與手機版輸入優化 */
             .input-group { display: flex; gap: 10px; width: 100%; }
             input[type="text"] { flex: 1; padding: 14px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 16px; -webkit-appearance: none; }
             button { padding: 14px 28px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 16px; transition: 0.2s; }
             button:hover { background: #0056b3; }
-            
             #chat { background: var(--bg); border: 1px solid var(--border); padding: 15px; height: 380px; overflow-y: auto; white-space: pre-line; margin-bottom: 12px; border-radius: 6px; font-size: 15px; }
-            
-            /* ⑨ 拖曳上傳與行動端點擊優化 */
             .drop-zone { border: 2px dashed #007bff; padding: 35px 20px; text-align: center; border-radius: 8px; cursor: pointer; margin-bottom: 10px; background: rgba(0,123,255,0.04); transition: 0.2s; min-height: 110px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
             .drop-zone.hover { background: rgba(0,123,255,0.15); border-color: #0056b3; }
             .stats-text { font-size: 13px; opacity: 0.8; margin-top: 5px; font-weight: 500; }
-            
             h1 { font-size: 1.65rem; margin-bottom: 15px; text-align: center; }
             h2 { font-size: 1.15rem; margin-top: 0; }
-            
-            /* 針對平板/大螢幕優化排版 */
             @media (min-width: 768px) {
                 body { margin: 40px auto; max-width: 900px; }
                 h1 { text-align: left; }
@@ -206,7 +184,6 @@ def index_page():
     </head>
     <body>
         <h1>🏢 本地企業智能知識庫系統</h1>
-        
         <div class="box">
             <h2>1. 文件核心匯入中心</h2>
             <div id="dropZone" class="drop-zone">
@@ -217,7 +194,6 @@ def index_page():
             <p id="uploadStatus" style="color: #007bff; font-size: 14px; font-weight:bold; margin: 5px 0;"></p>
             <div class="stats-text" id="statsDisplay">讀取數據庫統計中...</div>
         </div>
-
         <div class="box">
             <h2>2. 企業規章文檔檢索</h2>
             <div id="chat">等待上傳文檔或直接對現存硬碟知識庫提問...</div>
@@ -226,9 +202,7 @@ def index_page():
                 <button onclick="sendQuery()">提問</button>
             </div>
         </div>
-
         <script>
-            // ⑧ 更新資料庫狀態
             async function updateStats() {
                 try {
                     const res = await fetch('/stats');
@@ -240,11 +214,7 @@ def index_page():
 
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
-
-            // 平板觸控與點擊相容事件
             dropZone.onclick = () => fileInput.click();
-            
-            // 桌面端拖曳事件
             dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('hover'); };
             dropZone.ondragleave = () => dropZone.classList.remove('hover');
             dropZone.ondrop = (e) => {
@@ -263,7 +233,6 @@ def index_page():
                 fd.append('file', fileInput.files[0]);
                 status.style.color = '#007bff';
                 status.innerText = `⏳ 正在為 "${fileInput.files[0].name}" 進行深度矩陣向量建檔，請稍候...`;
-                
                 try {
                     const res = await fetch('/upload', { method: 'POST', body: fd });
                     const r = await res.json();
@@ -281,7 +250,6 @@ def index_page():
                 }
             }
 
-            // 串流提問
             function sendQuery() {
                 const qi = document.getElementById('questionInput');
                 const cb = document.getElementById('chat');
@@ -289,7 +257,7 @@ def index_page():
                 if(!q) return;
 
                 if(cb.innerText.includes('等待上傳文檔')) cb.innerHTML = '';
-                cb.innerHTML += `<b>🙋 使用者:</b> ${q}\n`;
+                cb.innerHTML += `<b>🙋 使用者:</b> ${q}\\n`;
                 
                 const aiBox = document.createElement('span');
                 aiBox.innerHTML = '<b>🤖 助手:</b> 思考中...';
@@ -300,13 +268,19 @@ def index_page():
                 const es = new EventSource(`/query?question=${encodeURIComponent(q)}`);
                 es.onmessage = function(e) {
                     if(aiBox.innerHTML.includes('思考中...')) { aiBox.innerHTML = '<b>🤖 助手:</b> '; }
-                    // 還原串流換行
                     aiBox.innerText += e.data.replace(/\\\\n/g, '\\n');
                     cb.scrollTop = cb.scrollHeight;
                 };
-                es.onerror = function() { es.close(); cb.innerHTML += '\n'; };
+                es.onerror = function() { es.close(); cb.innerHTML += '\\n'; };
             }
         </script>
     </body>
     </html>
     """
+
+# ==========================================
+# 6. 本地直接執行入口 (若用 Python main.py 啟動)
+# ==========================================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
