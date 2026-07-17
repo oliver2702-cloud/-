@@ -161,7 +161,7 @@ def stats():
     return {"chunks": count, "documents": doc_count}
 
 # ==========================================
-# 5. 精美 UI 網頁（包含 ⑨ 拖曳、⑩ 深色模式）
+# 5. 精美 UI 網頁（包含 ⑨ 拖曳、⑩ 深色模式，全面優化平板點擊）
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def index_page():
@@ -170,7 +170,7 @@ def index_page():
     <html lang="zh-TW">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>在地智能知識庫 (持久化版)</title>
         <style>
             :root { --bg: #f4f6f9; --box-bg: white; --text: #333; --border: #ccc; }
@@ -178,16 +178,30 @@ def index_page():
             @media (prefers-color-scheme: dark) {
                 :root { --bg: #121212; --box-bg: #1e1e1e; --text: #e0e0e0; --border: #444; }
             }
-            body { font-family: system-ui, sans-serif; margin: 30px; background: var(--bg); color: var(--text); transition: 0.3s; }
+            body { font-family: system-ui, sans-serif; margin: 20px; background: var(--bg); color: var(--text); transition: 0.3s; }
             .box { background: var(--box-bg); padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid var(--border); }
-            input[type="text"] { width: 75%; padding: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
-            button { padding: 12px 24px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+            
+            /* 平板與手機版輸入優化 */
+            .input-group { display: flex; gap: 10px; width: 100%; }
+            input[type="text"] { flex: 1; padding: 14px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 16px; -webkit-appearance: none; }
+            button { padding: 14px 28px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 16px; transition: 0.2s; }
             button:hover { background: #0056b3; }
-            #chat { background: var(--bg); border: 1px solid var(--border); padding: 15px; height: 350px; overflow-y: auto; white-space: pre-line; margin-bottom: 10px; border-radius: 4px; }
-            /* ⑨ 拖曳上傳區視覺 */
-            .drop-zone { border: 2px dashed #007bff; padding: 30px; text-align: center; border-radius: 6px; cursor: pointer; margin-bottom: 10px; background: rgba(0,123,255,0.05); }
+            
+            #chat { background: var(--bg); border: 1px solid var(--border); padding: 15px; height: 380px; overflow-y: auto; white-space: pre-line; margin-bottom: 12px; border-radius: 6px; font-size: 15px; }
+            
+            /* ⑨ 拖曳上傳與行動端點擊優化 */
+            .drop-zone { border: 2px dashed #007bff; padding: 35px 20px; text-align: center; border-radius: 8px; cursor: pointer; margin-bottom: 10px; background: rgba(0,123,255,0.04); transition: 0.2s; min-height: 110px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
             .drop-zone.hover { background: rgba(0,123,255,0.15); border-color: #0056b3; }
-            .stats-text { font-size: 14px; opacity: 0.8; margin-top: 5px; }
+            .stats-text { font-size: 13px; opacity: 0.8; margin-top: 5px; font-weight: 500; }
+            
+            h1 { font-size: 1.65rem; margin-bottom: 15px; text-align: center; }
+            h2 { font-size: 1.15rem; margin-top: 0; }
+            
+            /* 針對平板/大螢幕優化排版 */
+            @media (min-width: 768px) {
+                body { margin: 40px auto; max-width: 900px; }
+                h1 { text-align: left; }
+            }
         </style>
     </head>
     <body>
@@ -196,18 +210,18 @@ def index_page():
         <div class="box">
             <h2>1. 文件核心匯入中心</h2>
             <div id="dropZone" class="drop-zone">
-                將檔案拖曳至此處，或點擊此區域選取檔案<br>
-                <span style="font-size:12px; opacity:0.7;">(支援 PDF, DOCX, XLSX, PPTX, CSV, TXT)</span>
+                <strong style="color: #007bff;">點擊此處選取檔案</strong> 或將檔案拖曳至此<br>
+                <span style="font-size:12px; opacity:0.7; margin-top: 5px;">(支援 PDF, DOCX, XLSX, PPTX, CSV, TXT)</span>
             </div>
             <input type="file" id="fileInput" style="display:none;">
-            <p id="uploadStatus" style="color: #007bff; font-size: 14px; font-weight:bold;"></p>
+            <p id="uploadStatus" style="color: #007bff; font-size: 14px; font-weight:bold; margin: 5px 0;"></p>
             <div class="stats-text" id="statsDisplay">讀取數據庫統計中...</div>
         </div>
 
         <div class="box">
             <h2>2. 企業規章文檔檢索</h2>
             <div id="chat">等待上傳文檔或直接對現存硬碟知識庫提問...</div>
-            <div style="display:flex; gap:10px;">
+            <div class="input-group">
                 <input type="text" id="questionInput" placeholder="請輸入您的問題..." onkeypress="if(event.keyCode==13) sendQuery()">
                 <button onclick="sendQuery()">提問</button>
             </div>
@@ -224,11 +238,13 @@ def index_page():
             }
             window.onload = updateStats;
 
-            // ⑨ 拖曳上傳與點擊整合事件
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
 
+            // 平板觸控與點擊相容事件
             dropZone.onclick = () => fileInput.click();
+            
+            // 桌面端拖曳事件
             dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('hover'); };
             dropZone.ondragleave = () => dropZone.classList.remove('hover');
             dropZone.ondrop = (e) => {
@@ -245,15 +261,23 @@ def index_page():
                 const status = document.getElementById('uploadStatus');
                 const fd = new FormData();
                 fd.append('file', fileInput.files[0]);
-                status.innerText = `正在為 "${fileInput.files[0].name}" 進行深度矩陣向量建檔，請稍候...`;
+                status.style.color = '#007bff';
+                status.innerText = `⏳ 正在為 "${fileInput.files[0].name}" 進行深度矩陣向量建檔，請稍候...`;
                 
-                const res = await fetch('/upload', { method: 'POST', body: fd });
-                const r = await res.json();
-                if(r.status === 'success') {
-                    status.innerText = `✅ 成功覆蓋/更新！已轉換 ${r.chunks_added} 個語義區塊並安全儲存至硬碟。`;
-                    updateStats();
-                } else {
-                    status.innerText = '❌ 錯誤: ' + r.detail;
+                try {
+                    const res = await fetch('/upload', { method: 'POST', body: fd });
+                    const r = await res.json();
+                    if(r.status === 'success') {
+                        status.style.color = '#28a745';
+                        status.innerText = `✅ 成功覆蓋/更新！已轉換 ${r.chunks_added} 個語義區塊並安全儲存至硬碟。`;
+                        updateStats();
+                    } else {
+                        status.style.color = '#dc3545';
+                        status.innerText = '❌ 錯誤: ' + r.detail;
+                    }
+                } catch(err) {
+                    status.style.color = '#dc3545';
+                    status.innerText = '❌ 連線失敗，請檢查後端是否正常運行。';
                 }
             }
 
@@ -268,12 +292,14 @@ def index_page():
                 cb.innerHTML += `<b>🙋 使用者:</b> ${q}\n`;
                 
                 const aiBox = document.createElement('span');
-                aiBox.innerHTML = '<b>🤖 助手:</b> ';
+                aiBox.innerHTML = '<b>🤖 助手:</b> 思考中...';
                 cb.appendChild(aiBox);
                 qi.value = '';
+                cb.scrollTop = cb.scrollHeight;
 
                 const es = new EventSource(`/query?question=${encodeURIComponent(q)}`);
                 es.onmessage = function(e) {
+                    if(aiBox.innerHTML.includes('思考中...')) { aiBox.innerHTML = '<b>🤖 助手:</b> '; }
                     // 還原串流換行
                     aiBox.innerText += e.data.replace(/\\\\n/g, '\\n');
                     cb.scrollTop = cb.scrollHeight;
