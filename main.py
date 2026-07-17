@@ -1,25 +1,4 @@
 import os
-import sys
-import subprocess
-
-# ==========================================
-# 0. 自動安裝套件機制 (確保雲端單檔案順利執行)
-# ==========================================
-REQUIRED_PACKAGES = [
-    "fastapi", "uvicorn", "pypdf", "python-docx", 
-    "openpyxl", "python-pptx", "pandas", "chromadb", 
-    "langchain-community", "langchain-ollama"
-]
-
-for package in REQUIRED_PACKAGES:
-    try:
-        __import__(package.replace("-", "_"))
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-# ==========================================
-# 1. 核心套件匯入
-# ==========================================
 import io
 from typing import Generator
 from fastapi import FastAPI, File, UploadFile
@@ -35,20 +14,26 @@ import pandas as pd
 # LangChain 與 向量庫套件
 import chromadb
 from langchain_community.vectorstores import Chroma
-from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_core.documents import Document as LCDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+# 💡 改用 Google Gemini 雲端 API 套件
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+
 # ==========================================
-# 2. 核心配置 (Chroma 永久保存版)
+# 1. 核心配置 (改用免費 Gemini 雲端引擎)
 # ==========================================
 app = FastAPI(title="Enterprise Lean RAG Hub")
 
 CHROMA_PATH = "./chroma_db"
 os.makedirs(CHROMA_PATH, exist_ok=True)
 
-embeddings = OllamaEmbeddings(base_url="http://localhost:11434", model="bge-m3")
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
+# 這裡設定金鑰，稍後會在 Render 後台填入
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "your-api-key-here")
+
+# 雲端 Embedding 與 LLM 模型設定
+embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GEMINI_API_KEY)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
 
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 vector_store = Chroma(
@@ -58,7 +43,7 @@ vector_store = Chroma(
 )
 
 # ==========================================
-# 3. 全格式文件解析與覆蓋更新
+# 2. 全格式文件解析與覆蓋更新
 # ==========================================
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -105,7 +90,7 @@ async def upload_document(file: UploadFile = File(...)):
         return {"status": "error", "detail": str(e)}
 
 # ==========================================
-# 4. RAG 檢索生成與多引用
+# 3. RAG 檢索生成與多引用 (改用 Gemini 串流)
 # ==========================================
 def generate_rag_stream(question: str) -> Generator[str, None, None]:
     if len(question.strip()) < 2:
@@ -113,7 +98,7 @@ def generate_rag_stream(question: str) -> Generator[str, None, None]:
         return
 
     try:
-        raw_docs = vector_store.similarity_search_with_score(question, k=8)
+        raw_docs = vector_store.similarity_search_with_score(question, k=6)
     except Exception:
         raw_docs = []
 
@@ -124,14 +109,10 @@ def generate_rag_stream(question: str) -> Generator[str, None, None]:
     seen_content = set()
     valid_docs = []
     for doc, score in raw_docs:
-        if score < 1.4 and doc.page_content not in seen_content:
+        if doc.page_content not in seen_content:
             seen_content.add(doc.page_content)
             valid_docs.append(doc)
     valid_docs = valid_docs[:4]
-
-    if not valid_docs:
-        yield "data: 🔍 搜尋了硬碟資料庫，但查無信心度足夠的相符片段。\\n\\n"
-        return
 
     context = "\n".join([f"【來源: {d.metadata.get('source')}】: {d.page_content}" for d in valid_docs])
     system_prompt = (
@@ -141,7 +122,9 @@ def generate_rag_stream(question: str) -> Generator[str, None, None]:
         f"【使用者問題】: {question}"
     )
 
-    llm = ChatOllama(base_url="http://localhost:11434", model="qwen2.5:7b", temperature=0.0, streaming=True)
+    # 使用 Gemini 1.5 Flash 免費且超快速模型
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY, temperature=0.0, streaming=True)
+    
     for chunk in llm.stream(system_prompt):
         yield f"data: {chunk.content.replace(chr(10), '\\n')}\n\n"
     
@@ -156,7 +139,7 @@ def chat_endpoint(question: str):
     return StreamingResponse(generate_rag_stream(question), media_type="text/event-stream")
 
 # ==========================================
-# 5. 統計數據路由
+# 4. 統計數據路由
 # ==========================================
 @app.get("/stats")
 def stats():
@@ -169,7 +152,7 @@ def stats():
     return {"chunks": count, "documents": doc_count}
 
 # ==========================================
-# 6. 精美 UI 網頁 (原生 HTML5/JS，100% 不崩潰，完美支援平板)
+# 5. 精美 UI 網頁
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def index_page():
@@ -179,7 +162,7 @@ def index_page():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>在地智能知識庫 (持久化版)</title>
+        <title>行動智能知識庫 (雲端免電腦版)</title>
         <style>
             :root { --bg: #f4f6f9; --box-bg: white; --text: #333; --border: #ccc; }
             @media (prefers-color-scheme: dark) {
@@ -204,7 +187,7 @@ def index_page():
         </style>
     </head>
     <body>
-        <h1>🏢 本地企業智能知識庫系統</h1>
+        <h1>🏢 雲端企業智能知識庫系統 (平板專用)</h1>
         <div class="box">
             <h2>1. 文件核心匯入中心</h2>
             <div id="dropZone" class="drop-zone">
@@ -228,7 +211,7 @@ def index_page():
                 try {
                     const res = await fetch('/stats');
                     const d = await res.json();
-                    document.getElementById('statsDisplay').innerText = `📊 目前本地儲存庫共包含： ${d.chunks} 個知識片段 (Chunks) / 存有 ${d.documents} 份獨立文檔`;
+                    document.getElementById('statsDisplay').innerText = `📊 目前雲端資料庫共包含： ${d.chunks} 個知識片段 (Chunks) / 存有 ${d.documents} 份獨立文檔`;
                 } catch(e) {}
             }
             window.onload = updateStats;
@@ -253,13 +236,13 @@ def index_page():
                 const fd = new FormData();
                 fd.append('file', fileInput.files[0]);
                 status.style.color = '#007bff';
-                status.innerText = `⏳ 正在為 "${fileInput.files[0].name}" 進行深度矩陣向量建檔，請稍候...`;
+                status.innerText = `⏳ 正在為 "${fileInput.files[0].name}" 進行語義向量建檔，請稍候...`;
                 try {
                     const res = await fetch('/upload', { method: 'POST', body: fd });
                     const r = await res.json();
                     if(r.status === 'success') {
                         status.style.color = '#28a745';
-                        status.innerText = `✅ 成功覆蓋/更新！已轉換 ${r.chunks_added} 個語義區塊並安全儲存至硬碟。`;
+                        status.innerText = `✅ 成功更新！已轉換 ${r.chunks_added} 個語義區塊並安全儲存。`;
                         updateStats();
                     } else {
                         status.style.color = '#dc3545';
@@ -299,9 +282,6 @@ def index_page():
     </html>
     """
 
-# ==========================================
-# 7. 本地直接執行入口 (若用 Python main.py 啟動)
-# ==========================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
